@@ -13,20 +13,23 @@ from __future__ import annotations
 import html
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from . import config
 
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 4  # seconds; multiplied by attempt number
 
-_VALID_PRIORITIES = ("high", "medium", "low")
+_LOCAL_TZ = ZoneInfo("Europe/Madrid")
+
+_VALID_PRIORITIES = ("high", "emea", "medium", "low")
 
 _SYSTEM_INSTRUCTION = """You are an expert Valorant esports analyst building a \
 daily match digest for a competitive player based in Spain (EMEA region).
 
-Classify every match into exactly one priority: "high", "medium" or "low".
-Apply the rules in order; the first matching rule wins.
+Classify every match into exactly one priority: "high", "emea", "medium" or
+"low". Apply the rules in order; the first matching rule wins.
 
 HIGH priority — Tier 1:
 - VCT international LEAGUE matches. Order of interest: EMEA > Americas > Pacific
@@ -36,13 +39,18 @@ HIGH priority — Tier 1:
 - National-team events, e.g. Esports Nation Cup.
   (Tier 1 events never contain the words "Challengers" or "Game Changers".)
 
-MEDIUM priority — Tier 2 ("Challengers" events). Order of interest:
+EMEA priority — the top EMEA "Challengers" (above all other Challengers):
 1. Challengers Spain Rising (event name usually contains "Spain Rising").
 2. Global EMEA Challengers with the best teams, e.g. "Challengers ... EMEA
    Stage X".
-3. Other EMEA regional Challengers, e.g. North/East, France Revolution,
-   DACH Evolution, etc.
-4. Challengers in other regions, e.g. Challengers Japan, etc.
+Use priority "emea" ONLY for these two; every other Challengers event is
+"medium".
+
+MEDIUM priority — all other Tier 2 ("Challengers") events. Order of interest:
+1. Other EMEA regional Challengers, e.g. North/East, France Revolution,
+   DACH Evolution, Ascension, etc.
+2. Challengers in other regions, e.g. Challengers Japan, North America, LATAM,
+   Brazil, Korea, etc.
 
 LOW priority — not relevant:
 - Any Game Changers event (the entire circuit).
@@ -52,7 +60,7 @@ LOW priority — not relevant:
 Within each priority, order matches following the interest order above.
 
 Return ONLY valid JSON of the form:
-{"rankings": [{"index": <int>, "priority": "high|medium|low"}, ...]}
+{"rankings": [{"index": <int>, "priority": "high|emea|medium|low"}, ...]}
 Include exactly one entry for every match index provided."""
 
 
@@ -89,8 +97,10 @@ def _heuristic_priority(match: dict) -> str:
     if ("vct" in event or "champions tour" in event) and "challengers" not in event:
         return "high"
 
-    # MEDIUM (Tier 2): any Challengers event (EMEA or otherwise).
+    # EMEA priority: the top EMEA Challengers (Spain Rising + global EMEA league).
     if "challengers" in event:
+        if "spain rising" in event or "emea" in event:
+            return "emea"
         return "medium"
 
     return "low"
@@ -213,30 +223,34 @@ def _vct_league_region(event: str) -> str | None:
     return None
 
 
-def _tier2_order(event: str) -> int:
-    """Interest order within the Tier 2 (Challengers) bucket."""
+def _emea_order(event: str) -> int:
+    """Interest order within the EMEA-priority bucket."""
     e = (event or "").lower()
     if "spain rising" in e:
-        return 0
-    if "emea" in e:
-        return 1
+        return 0  # Spain Rising first.
+    return 1  # Global EMEA Challengers.
+
+
+def _tier2_order(event: str) -> int:
+    """Interest order within the Tier 2 (other Challengers) bucket."""
+    e = (event or "").lower()
     regional_emea = ("north", "east", "france", "dach", "revolution", "evolution", "ascension")
     if any(k in e for k in regional_emea):
-        return 2
-    return 3
+        return 0  # Other EMEA regional Challengers.
+    return 1  # Challengers in other regions.
 
 
 def format_digest(matches: list[dict], rankings: dict[int, str]) -> str:
     """Build the Telegram message (HTML parse mode) from ranked matches."""
-    today = datetime.now(timezone.utc).strftime("%d %b %Y")
+    today = datetime.now(_LOCAL_TZ).strftime("%d %b %Y")
 
-    parts = [f"🎯 <b>Valorant Daily Digest</b> — {today}"]
+    parts = [f"🎯 <b>Valorant Daily Digest</b> — {today}", "<i>Times in CEST (Europe/Madrid)</i>"]
 
     if not matches:
         parts.append("\nNo upcoming matches found for the next couple of days. 🌙")
         return "\n".join(parts)
 
-    buckets: dict[str, list[dict]] = {"high": [], "medium": [], "low": []}
+    buckets: dict[str, list[dict]] = {"high": [], "emea": [], "medium": [], "low": []}
     for i, match in enumerate(matches):
         buckets[rankings.get(i, "low")].append(match)
 
@@ -263,7 +277,13 @@ def format_digest(matches: list[dict], rankings: dict[int, str]) -> str:
             parts.append("🏅 <b>Other Tier 1</b>")
             parts.extend(_format_match_line(match) for match in other_tier1)
 
-    # --- MEDIUM (Tier 2) — ordered by interest ---
+    # --- EMEA: top EMEA Challengers (Spain Rising + global EMEA league) ---
+    emea = sorted(buckets["emea"], key=lambda m: _emea_order(m["event"]))
+    if emea:
+        parts.append("\n⭐ <b>EMEA Challengers</b>")
+        parts.extend(_format_match_line(m) for m in emea)
+
+    # --- MEDIUM (other Tier 2) — ordered by interest ---
     medium = sorted(buckets["medium"], key=lambda m: _tier2_order(m["event"]))
     if medium:
         parts.append("\n⚡ <b>Medium Priority</b>")

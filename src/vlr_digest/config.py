@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-DEFAULT_DAYS_AHEAD = 2
-DEFAULT_MAX_MATCHES = 40
+DEFAULT_DAY_START_HOUR = 9
+DEFAULT_MAX_MATCHES = 60
 
 # Variables the bot cannot run without.
 REQUIRED_ENV: tuple[str, ...] = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
@@ -32,8 +32,13 @@ def telegram_chat_id() -> str:
     return os.environ["TELEGRAM_CHAT_ID"]
 
 
-def days_ahead() -> int:
-    return int(os.getenv("DIGEST_DAYS_AHEAD", str(DEFAULT_DAYS_AHEAD)))
+def day_start_hour() -> int:
+    """Hour (local CEST time) at which the digest "day" starts and ends.
+
+    The digest covers matches from this hour today until the same hour
+    tomorrow (e.g. 09:00 CEST → 09:00 CEST the next day).
+    """
+    return int(os.getenv("DIGEST_DAY_START_HOUR", str(DEFAULT_DAY_START_HOUR)))
 
 
 def max_matches() -> int:

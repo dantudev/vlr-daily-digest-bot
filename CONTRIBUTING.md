@@ -69,5 +69,5 @@ for deployment):
 | `TELEGRAM_CHAT_ID`   | yes      | Target chat / user ID                         |
 | `GEMINI_API_KEY`     | no       | Gemini key (falls back to heuristic ranking)  |
 | `GEMINI_MODEL`       | no       | Defaults to `gemini-2.5-flash`                |
-| `DIGEST_DAYS_AHEAD`  | no       | Days of schedule to include (default `2`)     |
-| `DIGEST_MAX_MATCHES` | no       | Max matches per digest (default `40`)         |
+| `DIGEST_DAY_START_HOUR` | no    | Hour (CEST) the digest day starts/ends (default `9`) |
+| `DIGEST_MAX_MATCHES` | no       | Safety cap on matches per digest (default `60`)     |

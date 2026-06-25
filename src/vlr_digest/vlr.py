@@ -8,7 +8,8 @@ required.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,6 +17,11 @@ from bs4 import BeautifulSoup
 from . import config
 
 VLR_MATCHES_URL = "https://www.vlr.gg/matches"
+
+# vlr.gg renders match times in US Eastern time for anonymous requests; we
+# convert everything to the player's local timezone (Spain / CEST).
+SOURCE_TZ = ZoneInfo("America/New_York")
+LOCAL_TZ = ZoneInfo("Europe/Madrid")
 
 _HEADERS = {
     "User-Agent": (
@@ -37,9 +43,30 @@ _REGION_HINTS = [
 ]
 
 _DATE_RE = re.compile(r"([A-Za-z]+\s+\d{1,2},\s+\d{4})")
+_TIME_FORMATS = ("%I:%M %p", "%H:%M")
 
 
-def _parse_label_date(label_text: str) -> datetime.date | None:
+def _to_local_datetime(match_date, time_text: str) -> datetime | None:
+    """Combine a vlr.gg date + time into a timezone-aware local datetime.
+
+    The vlr.gg time is interpreted as US Eastern (its default for anonymous
+    requests) and converted to ``LOCAL_TZ`` (Europe/Madrid / CEST). Returns
+    ``None`` if the time cannot be parsed (e.g. "TBD").
+    """
+    if not match_date or not time_text:
+        return None
+    cleaned = time_text.strip().upper().replace(".", "")
+    for fmt in _TIME_FORMATS:
+        try:
+            parsed = datetime.strptime(cleaned, fmt).time()
+        except ValueError:
+            continue
+        source = datetime.combine(match_date, parsed, tzinfo=SOURCE_TZ)
+        return source.astimezone(LOCAL_TZ)
+    return None
+
+
+def _parse_label_date(label_text: str) -> date | None:
     """Extract a ``date`` object from a vlr.gg date header, or ``None``."""
     match = _DATE_RE.search(label_text or "")
     if not match:
@@ -68,7 +95,7 @@ def _team_name(team_el) -> str:
     return name or "TBD"
 
 
-def _parse_match(item, match_date) -> dict:
+def _parse_match(item, match_date) -> tuple[dict, datetime | None]:
     time_el = item.select_one(".match-item-time")
     match_time = time_el.get_text(strip=True) if time_el else "TBD"
 
@@ -93,25 +120,49 @@ def _parse_match(item, match_date) -> dict:
     href = item.get("href") or ""
     url = f"https://www.vlr.gg{href}" if href.startswith("/") else href
 
-    return {
+    # Convert the kickoff time to local (CEST) time. The local date can differ
+    # from the vlr.gg (US) date for late-night matches.
+    start_dt = _to_local_datetime(match_date, match_time)
+    display_time = start_dt.strftime("%H:%M") if start_dt else match_time
+    if start_dt is not None:
+        date_iso = start_dt.date().isoformat()
+    else:
+        date_iso = match_date.isoformat() if match_date else None
+
+    match = {
         "team1": team1,
         "team2": team2,
-        "time": match_time,
-        "date": match_date.isoformat() if match_date else None,
+        "time": display_time,
+        "date": date_iso,
         "event": event or "Unknown event",
         "series": series,
         "region": _region_hint(event),
         "eta": eta,
         "url": url,
     }
+    return match, start_dt
 
 
-def parse_matches(html: str, days_ahead: int, max_matches: int) -> list[dict]:
-    """Parse the vlr.gg matches HTML into structured, date-filtered matches."""
+def parse_matches(html: str, max_matches: int, day_start_hour: int) -> list[dict]:
+    """Parse the vlr.gg matches HTML into structured matches for one digest day.
+
+    A digest "day" runs from ``day_start_hour`` (local/CEST) today until the
+    same hour tomorrow, so the message only covers matches the player can watch
+    within that window.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
-    today = datetime.now(timezone.utc).date()
-    cutoff = today + timedelta(days=days_ahead)
+    now_local = datetime.now(LOCAL_TZ)
+    day_start = now_local.replace(hour=day_start_hour, minute=0, second=0, microsecond=0)
+    if now_local < day_start:
+        # Before the daily cut-off we are still inside yesterday's digest day.
+        day_start -= timedelta(days=1)
+    window_end = day_start + timedelta(days=1)
+
+    # Coarse label-date bounds expressed in the source (vlr.gg / US) timezone,
+    # used only to stop scanning early.
+    src_start_date = day_start.astimezone(SOURCE_TZ).date()
+    src_end_date = window_end.astimezone(SOURCE_TZ).date()
 
     # Date labels and match cards appear as siblings in document order.
     nodes = soup.select("div.wf-label.mod-large, a.wf-module-item.match-item")
@@ -127,14 +178,21 @@ def parse_matches(html: str, days_ahead: int, max_matches: int) -> list[dict]:
 
         # It's a match item.
         if current_date is not None:
-            if current_date < today:
+            if current_date < src_start_date:
                 continue
-            if current_date > cutoff:
+            if current_date > src_end_date:
                 break  # Schedule is chronological; nothing later is in range.
 
-        match = _parse_match(node, current_date)
+        match, start_dt = _parse_match(node, current_date)
         # Skip fully undecided placeholder matches.
         if match["team1"] == "TBD" and match["team2"] == "TBD":
+            continue
+
+        # Keep only matches whose kickoff falls inside the digest-day window.
+        if start_dt is not None:
+            if not (day_start <= start_dt < window_end):
+                continue
+        elif current_date is None or not (src_start_date <= current_date <= src_end_date):
             continue
 
         matches.append(match)
@@ -144,31 +202,27 @@ def parse_matches(html: str, days_ahead: int, max_matches: int) -> list[dict]:
     return matches
 
 
-def fetch_upcoming_matches(
-    days_ahead: int | None = None, max_matches: int | None = None
-) -> list[dict]:
-    """Return upcoming matches for the next ``days_ahead`` days.
+def fetch_upcoming_matches(max_matches: int | None = None) -> list[dict]:
+    """Return matches for the current digest day (local/CEST window).
 
     Args:
-        days_ahead: How many days past today (UTC) to include. Defaults to the
-            ``DIGEST_DAYS_AHEAD`` environment variable.
-        max_matches: Hard cap on the number of matches returned. Defaults to the
-            ``DIGEST_MAX_MATCHES`` environment variable.
+        max_matches: Hard safety cap on the number of matches returned.
+            Defaults to the ``DIGEST_MAX_MATCHES`` environment variable.
     """
-    days_ahead = config.days_ahead() if days_ahead is None else days_ahead
     max_matches = config.max_matches() if max_matches is None else max_matches
+    day_start_hour = config.day_start_hour()
 
     html_file = config.vlr_html_file()
     if html_file:
         # Offline mode: parse a local HTML snapshot instead of hitting the network.
         with open(html_file, encoding="utf-8") as fh:
             html = fh.read()
-        return parse_matches(html, days_ahead=days_ahead, max_matches=max_matches)
+        return parse_matches(html, max_matches=max_matches, day_start_hour=day_start_hour)
 
     response = requests.get(VLR_MATCHES_URL, headers=_HEADERS, timeout=30)
     response.raise_for_status()
 
-    return parse_matches(response.text, days_ahead=days_ahead, max_matches=max_matches)
+    return parse_matches(response.text, max_matches=max_matches, day_start_hour=day_start_hour)
 
 
 if __name__ == "__main__":
