@@ -25,6 +25,23 @@ _LOCAL_TZ = ZoneInfo("Europe/Madrid")
 
 _VALID_PRIORITIES = ("high", "emea", "medium", "low")
 
+# Keywords identifying "other" EMEA regional Challengers (below Spain Rising and
+# the global EMEA Challengers, but still inside the EMEA-priority bucket).
+_EMEA_REGIONAL_KEYWORDS = (
+    "north",
+    "east",
+    "france",
+    "revolution",
+    "dach",
+    "evolution",
+    "ascension",
+)
+
+# Soft cap on the raw message length. High Tier 1 and the top EMEA Challengers
+# (Spain Rising + global EMEA) are always shown in full; everything below that
+# is only included while the message stays under this budget.
+_MAX_MESSAGE_CHARS = 3500
+
 _SYSTEM_INSTRUCTION = """You are an expert Valorant esports analyst building a \
 daily match digest for a competitive player based in Spain (EMEA region).
 
@@ -43,14 +60,14 @@ EMEA priority — the top EMEA "Challengers" (above all other Challengers):
 1. Challengers Spain Rising (event name usually contains "Spain Rising").
 2. Global EMEA Challengers with the best teams, e.g. "Challengers ... EMEA
    Stage X".
-Use priority "emea" ONLY for these two; every other Challengers event is
+3. Other EMEA regional Challengers, e.g. North/East, France Revolution,
+   DACH Evolution, Ascension, etc. (lowest within EMEA priority, but still
+   prioritised above any non-EMEA Challengers).
+Use priority "emea" for these three; every other Challengers event is
 "medium".
 
-MEDIUM priority — all other Tier 2 ("Challengers") events. Order of interest:
-1. Other EMEA regional Challengers, e.g. North/East, France Revolution,
-   DACH Evolution, Ascension, etc.
-2. Challengers in other regions, e.g. Challengers Japan, North America, LATAM,
-   Brazil, Korea, etc.
+MEDIUM priority — Challengers events outside EMEA, e.g. Challengers Japan,
+North America, LATAM, Brazil, Korea, etc.
 
 LOW priority — not relevant:
 - Any Game Changers event (the entire circuit).
@@ -97,9 +114,12 @@ def _heuristic_priority(match: dict) -> str:
     if ("vct" in event or "champions tour" in event) and "challengers" not in event:
         return "high"
 
-    # EMEA priority: the top EMEA Challengers (Spain Rising + global EMEA league).
+    # EMEA priority: top EMEA Challengers (Spain Rising + global EMEA league)
+    # plus other EMEA regional Challengers (lowest within the EMEA bucket).
     if "challengers" in event:
         if "spain rising" in event or "emea" in event:
+            return "emea"
+        if any(k in event for k in _EMEA_REGIONAL_KEYWORDS):
             return "emea"
         return "medium"
 
@@ -228,16 +248,9 @@ def _emea_order(event: str) -> int:
     e = (event or "").lower()
     if "spain rising" in e:
         return 0  # Spain Rising first.
+    if any(k in e for k in _EMEA_REGIONAL_KEYWORDS):
+        return 2  # Other EMEA regional Challengers (lowest, space permitting).
     return 1  # Global EMEA Challengers.
-
-
-def _tier2_order(event: str) -> int:
-    """Interest order within the Tier 2 (other Challengers) bucket."""
-    e = (event or "").lower()
-    regional_emea = ("north", "east", "france", "dach", "revolution", "evolution", "ascension")
-    if any(k in e for k in regional_emea):
-        return 0  # Other EMEA regional Challengers.
-    return 1  # Challengers in other regions.
 
 
 def format_digest(matches: list[dict], rankings: dict[int, str]) -> str:
@@ -278,26 +291,44 @@ def format_digest(matches: list[dict], rankings: dict[int, str]) -> str:
             parts.extend(_format_match_line(match) for match in other_tier1)
 
     # --- EMEA: top EMEA Challengers (Spain Rising + global EMEA league) ---
+    # These are always shown in full; "other EMEA regional" Challengers
+    # (_emea_order == 2) are demoted to the space-limited section below.
     emea = sorted(buckets["emea"], key=lambda m: _emea_order(m["event"]))
-    if emea:
+    emea_top = [m for m in emea if _emea_order(m["event"]) < 2]
+    emea_regional = [m for m in emea if _emea_order(m["event"]) == 2]
+    if emea_top:
         parts.append("\n⭐ <b>EMEA Challengers</b>")
-        parts.extend(_format_match_line(m) for m in emea)
+        parts.extend(_format_match_line(m) for m in emea_top)
 
-    # --- MEDIUM (other Tier 2) — ordered by interest ---
-    medium = sorted(buckets["medium"], key=lambda m: _tier2_order(m["event"]))
-    if medium:
-        parts.append("\n⚡ <b>Medium Priority</b>")
-        parts.extend(_format_match_line(m) for m in medium)
-
-    # --- LOW — capped to keep the message readable ---
+    # Everything below is part of a *summary*: it is only included while the
+    # message stays under the soft length budget, in strict priority order.
+    medium = sorted(buckets["medium"], key=lambda m: m["event"].lower())
     low = buckets["low"]
-    if low:
-        parts.append("\n💤 <b>Low Priority</b>")
-        cap = 8
-        parts.extend(_format_match_line(m) for m in low[:cap])
-        if len(low) > cap:
-            parts.append(f"  …and {len(low) - cap} more")
 
-    # Note: very long messages are split safely on line boundaries by the
-    # Telegram client, so we never truncate mid-tag here.
+    optional_sections = [
+        ("\n🌍 <b>Other EMEA Challengers</b>", emea_regional),
+        ("\n⚡ <b>Medium Priority</b>", medium),
+        ("\n💤 <b>Low Priority</b>", low[:8]),
+    ]
+    omitted = sum(len(matches) for _, matches in optional_sections)
+
+    current_len = sum(len(p) + 1 for p in parts)
+    for header, section_matches in optional_sections:
+        header_added = False
+        for match in section_matches:
+            line = _format_match_line(match)
+            addition = len(line) + 1 + (len(header) + 1 if not header_added else 0)
+            if current_len + addition > _MAX_MESSAGE_CHARS:
+                break
+            if not header_added:
+                parts.append(header)
+                current_len += len(header) + 1
+                header_added = True
+            parts.append(line)
+            current_len += len(line) + 1
+            omitted -= 1
+
+    if omitted > 0:
+        parts.append(f"\n<i>…and {omitted} more lower-priority match(es) omitted.</i>")
+
     return "\n".join(parts)
