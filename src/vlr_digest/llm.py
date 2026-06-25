@@ -21,7 +21,6 @@ _MAX_RETRIES = 3
 _RETRY_BACKOFF = 4  # seconds; multiplied by attempt number
 
 _VALID_PRIORITIES = ("high", "medium", "low")
-_TELEGRAM_LIMIT = 4096
 
 _SYSTEM_INSTRUCTION = """You are an expert Valorant esports analyst building a \
 daily match digest for a competitive player based in Spain (EMEA region).
@@ -279,7 +278,6 @@ def format_digest(matches: list[dict], rankings: dict[int, str]) -> str:
         if len(low) > cap:
             parts.append(f"  …and {len(low) - cap} more")
 
-    message = "\n".join(parts)
-    if len(message) > _TELEGRAM_LIMIT:
-        message = message[: _TELEGRAM_LIMIT - 1].rstrip() + "…"
-    return message
+    # Note: very long messages are split safely on line boundaries by the
+    # Telegram client, so we never truncate mid-tag here.
+    return "\n".join(parts)

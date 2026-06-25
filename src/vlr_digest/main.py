@@ -28,18 +28,22 @@ def _check_env() -> None:
         print("[warn] GEMINI_API_KEY not set — using heuristic ranking fallback.")
 
 
-def main() -> None:
-    load_dotenv()
-    _check_env()
-
+def build_digest_message() -> str:
+    """Fetch upcoming matches, rank them, and return the formatted digest."""
     print("Fetching upcoming matches from vlr.gg…")
     matches = vlr.fetch_upcoming_matches()
     print(f"Found {len(matches)} matches.")
 
     print("Ranking matches with Gemini…")
     rankings = llm.rank_matches(matches)
+    return llm.format_digest(matches, rankings)
 
-    message = llm.format_digest(matches, rankings)
+
+def main() -> None:
+    load_dotenv()
+    _check_env()
+
+    message = build_digest_message()
     print("Sending digest to Telegram…")
     telegram.send_message(message)
     print("Done.")

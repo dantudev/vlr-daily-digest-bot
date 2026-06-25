@@ -13,8 +13,9 @@ _MAX_LENGTH = 4096
 def send_message(text: str) -> dict:
     """Send ``text`` to the configured Telegram chat.
 
-    Long messages are split into multiple Telegram messages. Returns the API
-    response of the last message sent.
+    Long messages are split into multiple Telegram messages on line
+    boundaries (so HTML tags are never cut mid-tag). Returns the API response
+    of the last message sent.
     """
     token = config.telegram_bot_token()
     chat_id = config.telegram_chat_id()
@@ -32,7 +33,11 @@ def send_message(text: str) -> dict:
             },
             timeout=30,
         )
-        response.raise_for_status()
+        if not response.ok:
+            # Surface Telegram's error description (e.g. parse errors) in logs.
+            raise RuntimeError(
+                f"Telegram sendMessage failed ({response.status_code}): {response.text}"
+            )
         result = response.json()
     return result
 
