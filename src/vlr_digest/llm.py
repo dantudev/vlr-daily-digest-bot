@@ -35,12 +35,35 @@ _EMEA_REGIONAL_KEYWORDS = (
     "dach",
     "evolution",
     "ascension",
+    "iberian",
+    "italy",
+    "portugal",
+    "t\u00fcrkiye",
+    "turkiye",
+    "birlik",
 )
 
-# Soft cap on the raw message length. High Tier 1 and the top EMEA Challengers
-# (Spain Rising + global EMEA) are always shown in full; everything below that
-# is only included while the message stays under this budget.
-_MAX_MESSAGE_CHARS = 3500
+# Keywords identifying Challengers regions OUTSIDE EMEA. These are checked
+# before the (looser) EMEA regional keywords so that e.g. "North America" or
+# "LATAM North" is never mistaken for an EMEA "North" league.
+_NON_EMEA_CHALLENGERS_KEYWORDS = (
+    "north america",
+    "latam",
+    "brazil",
+    "japan",
+    "korea",
+    "pacific",
+    "china",
+    "oceania",
+    "south asia",
+    "southeast asia",
+)
+
+# Target number of matches in the digest. High Tier 1 and the top EMEA
+# Challengers (Spain Rising + global EMEA) are ALWAYS shown in full, even if
+# they exceed this; the remaining (lower-priority) sections only fill up to
+# this total.
+_MAX_TOTAL_MATCHES = 8
 
 _SYSTEM_INSTRUCTION = """You are an expert Valorant esports analyst building a \
 daily match digest for a competitive player based in Spain (EMEA region).
@@ -61,8 +84,11 @@ EMEA priority — the top EMEA "Challengers" (above all other Challengers):
 2. Global EMEA Challengers with the best teams, e.g. "Challengers ... EMEA
    Stage X".
 3. Other EMEA regional Challengers, e.g. North/East, France Revolution,
-   DACH Evolution, Ascension, etc. (lowest within EMEA priority, but still
-   prioritised above any non-EMEA Challengers).
+   DACH Evolution, Ascension, Iberian, etc. (lowest within EMEA priority, but
+   still prioritised above any non-EMEA Challengers). IMPORTANT: an event is
+   only EMEA-regional when it clearly belongs to the EMEA circuit. Regions
+   such as "North America", "LATAM North", "Pacific", etc. are NOT EMEA even
+   though they contain words like "North" or "East".
 Use priority "emea" for these three; every other Challengers event is
 "medium".
 
@@ -119,6 +145,10 @@ def _heuristic_priority(match: dict) -> str:
     if "challengers" in event:
         if "spain rising" in event or "emea" in event:
             return "emea"
+        # Challengers from other regions are "medium" — checked before the
+        # looser EMEA-regional keywords ("north" would match "North America").
+        if any(k in event for k in _NON_EMEA_CHALLENGERS_KEYWORDS):
+            return "medium"
         if any(k in event for k in _EMEA_REGIONAL_KEYWORDS):
             return "emea"
         return "medium"
@@ -248,6 +278,9 @@ def _emea_order(event: str) -> int:
     e = (event or "").lower()
     if "spain rising" in e:
         return 0  # Spain Rising first.
+    # "north"/"east" must not pick up non-EMEA regions (e.g. North America).
+    if any(k in e for k in _NON_EMEA_CHALLENGERS_KEYWORDS):
+        return 1  # Treat as a global EMEA Challengers slot if it slipped in.
     if any(k in e for k in _EMEA_REGIONAL_KEYWORDS):
         return 2  # Other EMEA regional Challengers (lowest, space permitting).
     return 1  # Global EMEA Challengers.
@@ -300,32 +333,34 @@ def format_digest(matches: list[dict], rankings: dict[int, str]) -> str:
         parts.append("\n⭐ <b>EMEA Challengers</b>")
         parts.extend(_format_match_line(m) for m in emea_top)
 
-    # Everything below is part of a *summary*: it is only included while the
-    # message stays under the soft length budget, in strict priority order.
+    # Everything below is part of a *summary*: it only fills the remaining
+    # slots up to a target total number of matches, in strict priority order.
+    # (HIGH + EMEA-top above are always shown in full, even if they already
+    # exceed the target.)
     medium = sorted(buckets["medium"], key=lambda m: m["event"].lower())
     low = buckets["low"]
 
     optional_sections = [
         ("\n🌍 <b>Other EMEA Challengers</b>", emea_regional),
         ("\n⚡ <b>Medium Priority</b>", medium),
-        ("\n💤 <b>Low Priority</b>", low[:8]),
+        ("\n💤 <b>Low Priority</b>", low),
     ]
     omitted = sum(len(matches) for _, matches in optional_sections)
 
-    current_len = sum(len(p) + 1 for p in parts)
+    shown = len(high) + len(emea_top)
+    remaining = max(0, _MAX_TOTAL_MATCHES - shown)
     for header, section_matches in optional_sections:
+        if remaining <= 0:
+            break
         header_added = False
         for match in section_matches:
-            line = _format_match_line(match)
-            addition = len(line) + 1 + (len(header) + 1 if not header_added else 0)
-            if current_len + addition > _MAX_MESSAGE_CHARS:
+            if remaining <= 0:
                 break
             if not header_added:
                 parts.append(header)
-                current_len += len(header) + 1
                 header_added = True
-            parts.append(line)
-            current_len += len(line) + 1
+            parts.append(_format_match_line(match))
+            remaining -= 1
             omitted -= 1
 
     if omitted > 0:

@@ -123,7 +123,7 @@ def _parse_match(item, match_date) -> tuple[dict, datetime | None]:
     # Convert the kickoff time to local (CEST) time. The local date can differ
     # from the vlr.gg (US) date for late-night matches.
     start_dt = _to_local_datetime(match_date, match_time)
-    display_time = start_dt.strftime("%H:%M") if start_dt else match_time
+    display_time = start_dt.strftime("%I:%M %p").lstrip("0") if start_dt else match_time
     if start_dt is not None:
         date_iso = start_dt.date().isoformat()
     else:
