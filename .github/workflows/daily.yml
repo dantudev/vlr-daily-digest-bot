@@ -2,8 +2,8 @@ name: Daily VLR Digest
 
 on:
   schedule:
-    # Runs every day at 10:00 UTC
-    - cron: "0 10 * * *"
+    # GitHub delays scheduled runs by hours, so trigger early and sleep until 12:00 Madrid.
+    - cron: "13 5 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -12,8 +12,18 @@ permissions:
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 360
     steps:
+      - name: Wait until 12:00 Europe/Madrid
+        if: github.event_name == 'schedule'
+        run: |
+          target=$(TZ=Europe/Madrid date -d 'today 12:00' +%s)
+          wait=$(( target - $(date +%s) ))
+          if (( wait > 0 )); then
+            echo "Sleeping ${wait}s until 12:00 Europe/Madrid"
+            sleep "$wait"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
